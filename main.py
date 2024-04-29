@@ -1,3 +1,4 @@
+import os
 import sys
 import joblib
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QTextEdit, QFileDialog, QLabel
@@ -6,14 +7,18 @@ from PyQt5.QtCore import Qt
 import docx
 import pdfplumber
 import sqlite3
-from datetime import datetime
-
+from datetime import datetime, timedelta
+import torch 
+from transformers import RobertaTokenizer, RobertaForSequenceClassification, RobertaConfig
 
 class TextExtractorApp(QWidget):
     def __init__(self):
         super().__init__()
         self.model = joblib.load('random_forest_model.joblib')
         self.vectorizer = joblib.load('tfidf_vectorizer.joblib')
+        current_directory = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(current_directory, 'roberta_classification_model')
+        self.tokenizer = RobertaTokenizer.from_pretrained(model_path)
         self.number_to_category = {
             0: 'беспилотники',
             1: 'приказ',
@@ -26,6 +31,12 @@ class TextExtractorApp(QWidget):
             8: 'разведка',
             9: 'украина'
         }
+        self.roberta_number_to_category = {
+                0: 'обычные',
+                1: 'военные'
+            }
+        num_classes = len(self.roberta_number_to_category)
+        self.roberta_model = RobertaForSequenceClassification.from_pretrained(model_path, num_labels=num_classes)
         self.initUI()
         self.create_database()
 
@@ -44,8 +55,7 @@ class TextExtractorApp(QWidget):
         layout = QVBoxLayout(self)
 
         # Установка темной темы
-        self.setStyleSheet(
-            "QWidget { background-color: #2B2B2B; color: white; }")
+        self.setStyleSheet("QWidget { background-color: #2B2B2B; color: white; }")
 
         self.btn_load = QPushButton('Загрузить файл', self)
         self.btn_load.setStyleSheet("""
@@ -103,6 +113,9 @@ class TextExtractorApp(QWidget):
         self.label_category = QLabel('Категория: Не определена', self)
         layout.addWidget(self.label_category)
 
+        self.label_roberta_category = QLabel('Категория (RoBERTa): Не определена', self)
+        layout.addWidget(self.label_roberta_category)
+
         self.setLayout(layout)
         self.setWindowTitle('Text Extractor with Classification')
         self.setGeometry(300, 300, 600, 400)
@@ -136,39 +149,28 @@ class TextExtractorApp(QWidget):
         doc.save(filename)
 
     def show_actions_for_day(self):
-        # Получить действия за день
         actions_for_day = self.get_actions_for_day()
-
-        # Отобразить действия в текстовом редакторе
         self.text_edit.setPlainText('\n'.join(actions_for_day))
 
     def show_actions_for_week(self):
-        # Получить действия за неделю
         actions_for_week = self.get_actions_for_week()
-
-        # Отобразить действия в текстовом редакторе
         self.text_edit.setPlainText('\n'.join(actions_for_week))
 
     def show_actions_for_month(self):
-        # Получить действия за месяц
         actions_for_month = self.get_actions_for_month()
-
-        # Отобразить действия в текстовом редакторе
         self.text_edit.setPlainText('\n'.join(actions_for_month))
 
     def get_actions_for_day(self):
         today = datetime.now().strftime('%Y-%m-%d')
-        self.c.execute(
-            "SELECT category, file_path FROM actions WHERE date LIKE ?", (f'{today}%',))
+        self.c.execute("SELECT category, file_path FROM actions WHERE date LIKE ?", (f'{today}%',))
         actions_for_day = self.c.fetchall()
         return [f"{action[0]}: {action[1]}" for action in actions_for_day]
 
     def get_actions_for_week(self):
         today = datetime.now()
-        start_of_week = today - datetime.timedelta(days=today.weekday())
+        start_of_week = today - timedelta(days=today.weekday())
         start_of_week_str = start_of_week.strftime('%Y-%m-%d')
-        end_of_week_str = (
-            start_of_week + datetime.timedelta(days=6)).strftime('%Y-%m-%d')
+        end_of_week_str = (start_of_week + timedelta(days=6)).strftime('%Y-%m-%d')
         self.c.execute("SELECT category, file_path FROM actions WHERE date BETWEEN ? AND ?",
                        (start_of_week_str, end_of_week_str))
         actions_for_week = self.c.fetchall()
@@ -176,13 +178,11 @@ class TextExtractorApp(QWidget):
 
     def get_actions_for_month(self):
         today = datetime.now()
-        start_of_month = datetime.date(today.year, today.month, 1)
-        end_of_month = datetime.date(
-            today.year, today.month + 1, 1) - datetime.timedelta(days=1)
-        start_of_month_str = start_of_month.strftime('%Y-%m-%d')
-        end_of_month_str = end_of_month.strftime('%Y-%m-%d')
+        start_date = today - timedelta(days=30)
+        start_date_str = start_date.strftime('%Y-%m-%d')
+        end_date_str = today.strftime('%Y-%m-%d')
         self.c.execute("SELECT category, file_path FROM actions WHERE date BETWEEN ? AND ?",
-                       (start_of_month_str, end_of_month_str))
+                       (start_date_str, end_date_str))
         actions_for_month = self.c.fetchall()
         return [f"{action[0]}: {action[1]}" for action in actions_for_month]
 
@@ -194,11 +194,13 @@ class TextExtractorApp(QWidget):
             text = self.extractTextFromPDF(filename)
         self.text_edit.setPlainText(text)
         if text.strip():
-            category_name = self.classifyText(text)
+            category_name, roberta_category_name = self.classifyText(text)
             self.label_category.setText(f'Категория: {category_name}')
+            self.label_roberta_category.setText(f'Категория (RoBERTa): {roberta_category_name}')
             self.save_action(filename, category_name)
         else:
             self.label_category.setText('Категория: Текст не найден')
+            self.label_roberta_category.setText('Категория (RoBERTa): Текст не найден')
 
     def save_action(self, file_path, category):
         current_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -213,15 +215,41 @@ class TextExtractorApp(QWidget):
 
     def extractTextFromPDF(self, filename):
         with pdfplumber.open(filename) as pdf:
-            full_text = [page.extract_text()
-                         for page in pdf.pages if page.extract_text() is not None]
+            full_text = [page.extract_text() for page in pdf.pages if page.extract_text() is not None]
         return '\n'.join(full_text)
 
     def classifyText(self, text):
         text_vector = self.vectorizer.transform([text])
         prediction = self.model.predict(text_vector)
-        return self.number_to_category[prediction[0]]
+        category_name = self.number_to_category[prediction[0]]
 
+        # Получаем максимальную длину последовательности из конфигурации модели
+        max_length = self.roberta_model.config.max_position_embeddings
+        
+        # Токенизируем текст с учетом максимальной длины и добавляем padding
+        inputs = self.tokenizer(text, truncation=True, max_length=max_length, padding="max_length", return_tensors="pt")
+        
+        # Получаем маски внимания из входных данных
+        attention_mask = inputs["attention_mask"]
+        
+        # Получаем position_ids
+        position_ids = torch.arange(inputs["input_ids"].size(1)).expand(1, -1)
+        
+        # Переносим входные данные на устройство модели
+        inputs = {k: v.to(self.roberta_model.device) for k, v in inputs.items()}
+        position_ids = position_ids.to(self.roberta_model.device)
+        
+        # Передаем маски внимания в модель
+        outputs = self.roberta_model(input_ids=inputs["input_ids"], attention_mask=attention_mask, position_ids=position_ids)
+        
+        logits = outputs.logits
+        roberta_prediction = torch.argmax(logits, dim=1).item()
+        try:
+            roberta_category_name = self.roberta_number_to_category[roberta_prediction]
+        except KeyError:
+            roberta_category_name = "Unknown"
+
+        return category_name, roberta_category_name
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
