@@ -10,6 +10,8 @@ import sqlite3
 from datetime import datetime, timedelta
 import torch 
 from transformers import RobertaTokenizer, RobertaForSequenceClassification, RobertaConfig
+import pytesseract
+from PIL import Image
 
 class TextExtractorApp(QWidget):
     def __init__(self):
@@ -44,7 +46,7 @@ class TextExtractorApp(QWidget):
         self.conn = sqlite3.connect('actions.db')
         self.c = self.conn.cursor()
         self.c.execute('''CREATE TABLE IF NOT EXISTS actions
-                        (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, category TEXT, file_path TEXT)''')
+                        (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, category TEXT, roberta_category TEXT, file_path TEXT)''')
         self.conn.commit()
 
     def closeEvent(self, event):
@@ -123,7 +125,7 @@ class TextExtractorApp(QWidget):
     def loadFile(self):
         options = QFileDialog.Options()
         filename, _ = QFileDialog.getOpenFileName(
-            self, "Выберите файл", "", "Word Documents (*.docx);;PDF Files (*.pdf)", options=options)
+            self, "Выберите файл", "", "Word Documents (*.docx);;PDF Files (*.pdf);;Image Files (*.png *.jpg *.jpeg)", options=options)
         if filename:
             self.displayContent(filename)
             self.btn_save.setEnabled(True)
@@ -162,29 +164,29 @@ class TextExtractorApp(QWidget):
 
     def get_actions_for_day(self):
         today = datetime.now().strftime('%Y-%m-%d')
-        self.c.execute("SELECT category, file_path FROM actions WHERE date LIKE ?", (f'{today}%',))
+        self.c.execute("SELECT category, roberta_category, file_path FROM actions WHERE date LIKE ?", (f'{today}%',))
         actions_for_day = self.c.fetchall()
-        return [f"{action[0]}: {action[1]}" for action in actions_for_day]
+        return [f"Category: {action[0]}, RoBERTa Category: {action[1]}, File: {action[2]}" for action in actions_for_day]
 
     def get_actions_for_week(self):
         today = datetime.now()
         start_of_week = today - timedelta(days=today.weekday())
         start_of_week_str = start_of_week.strftime('%Y-%m-%d')
         end_of_week_str = (start_of_week + timedelta(days=6)).strftime('%Y-%m-%d')
-        self.c.execute("SELECT category, file_path FROM actions WHERE date BETWEEN ? AND ?",
+        self.c.execute("SELECT category, roberta_category, file_path FROM actions WHERE date BETWEEN ? AND ?",
                        (start_of_week_str, end_of_week_str))
         actions_for_week = self.c.fetchall()
-        return [f"{action[0]}: {action[1]}" for action in actions_for_week]
+        return [f"Category: {action[0]}, RoBERTa Category: {action[1]}, File: {action[2]}" for action in actions_for_week]
 
     def get_actions_for_month(self):
         today = datetime.now()
         start_date = today - timedelta(days=30)
         start_date_str = start_date.strftime('%Y-%m-%d')
         end_date_str = today.strftime('%Y-%m-%d')
-        self.c.execute("SELECT category, file_path FROM actions WHERE date BETWEEN ? AND ?",
+        self.c.execute("SELECT category, roberta_category, file_path FROM actions WHERE date BETWEEN ? AND ?",
                        (start_date_str, end_date_str))
         actions_for_month = self.c.fetchall()
-        return [f"{action[0]}: {action[1]}" for action in actions_for_month]
+        return [f"Category: {action[0]}, RoBERTa Category: {action[1]}, File: {action[2]}" for action in actions_for_month]
 
     def displayContent(self, filename):
         text = ''
@@ -192,20 +194,22 @@ class TextExtractorApp(QWidget):
             text = self.extractTextFromDocx(filename)
         elif filename.endswith('.pdf'):
             text = self.extractTextFromPDF(filename)
+        elif filename.endswith(('.png', '.jpg', '.jpeg')):
+            text = self.extractTextFromImage(filename)
         self.text_edit.setPlainText(text)
         if text.strip():
             category_name, roberta_category_name = self.classifyText(text)
             self.label_category.setText(f'Категория: {category_name}')
             self.label_roberta_category.setText(f'Категория (RoBERTa): {roberta_category_name}')
-            self.save_action(filename, category_name)
+            self.save_action(filename, category_name, roberta_category_name)
         else:
             self.label_category.setText('Категория: Текст не найден')
             self.label_roberta_category.setText('Категория (RoBERTa): Текст не найден')
 
-    def save_action(self, file_path, category):
+    def save_action(self, file_path, category, roberta_category):
         current_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        self.c.execute("INSERT INTO actions (date, category, file_path) VALUES (?, ?, ?)",
-                       (current_date, category, file_path))
+        self.c.execute("INSERT INTO actions (date, category, roberta_category, file_path) VALUES (?, ?, ?, ?)",
+                       (current_date, category, roberta_category, file_path))
         self.conn.commit()
 
     def extractTextFromDocx(self, filename):
@@ -217,6 +221,11 @@ class TextExtractorApp(QWidget):
         with pdfplumber.open(filename) as pdf:
             full_text = [page.extract_text() for page in pdf.pages if page.extract_text() is not None]
         return '\n'.join(full_text)
+
+    def extractTextFromImage(self, filename):
+        image = Image.open(filename)
+        text = pytesseract.image_to_string(image, lang='rus')
+        return text
 
     def classifyText(self, text):
         text_vector = self.vectorizer.transform([text])
